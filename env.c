@@ -23,9 +23,17 @@ THE SOFTWARE.
 #include "env.h"
 #include <stdlib.h>
 
+#define MAX_PTRS_PER_THREAD (32 * 1024)
+#define MIN_PTRS_PER_THREAD 1024
+
+// # of ptrs a thread can "save up" before initiating a collection run.
 // The number of pointers per thread should be a power of 2 because we use
 // this number to do masking (to avoid the costly modulo operation).
-int threadscan_ptrs_per_thread = 2 * 1024;
+int g_threadscan_ptrs_per_thread;
+
+// Configurable maximum supported threads.  Exceeding this value in practice
+// leads to undefined behavior.
+int g_threadscan_max_thread_count;
 
 /** Parse an integer from a string.  0 if val is NULL.
  */
@@ -39,15 +47,36 @@ __attribute__((constructor))
 static void env_init ()
 {
     // Pointers per thread -- how many pointers a thread can track before a
-    // collection run occurs.
+    // collection run occurs.  This should be a power of 2.  To avoid
+    // complicated numbers the environment variable,
+    // THREADSCAN_PTRS_PER_THREAD, is multiplied by 1024 so that a user can
+    // think in terms of small powers of 2.
     {
         int ptrs_per_thread;
+        // Default is ~16000 pointers per thread, derived from trial data.
         ptrs_per_thread = get_int(getenv("THREADSCAN_PTRS_PER_THREAD"), 16);
-        if (ptrs_per_thread < 1) {
-            ptrs_per_thread = 1;
-        } else if (ptrs_per_thread > 32) {
-            ptrs_per_thread = 32;
+        ptrs_per_thread *= 1024;
+
+        // Round up to power of 2 bit trick:
+        --ptrs_per_thread;
+        ptrs_per_thread |= ptrs_per_thread >> 1;
+        ptrs_per_thread |= ptrs_per_thread >> 2;
+        ptrs_per_thread |= ptrs_per_thread >> 4;
+        ptrs_per_thread |= ptrs_per_thread >> 8;
+        ptrs_per_thread |= ptrs_per_thread >> 16;
+        ++ptrs_per_thread;
+
+        // Bounds-checking.
+        if (ptrs_per_thread < MIN_PTRS_PER_THREAD) {
+            ptrs_per_thread = MIN_PTRS_PER_THREAD;
+        } else if (ptrs_per_thread > MAX_PTRS_PER_THREAD) {
+            ptrs_per_thread = MAX_PTRS_PER_THREAD;
         }
-        threadscan_ptrs_per_thread = ptrs_per_thread * 1024;
+
+        g_threadscan_ptrs_per_thread = ptrs_per_thread;
+    }
+
+    {
+        g_threadscan_max_thread_count = 128;
     }
 }

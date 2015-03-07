@@ -66,6 +66,10 @@ struct mapline_t {
 static thread_list_t thread_list = { (thread_data_t*)0x1,
                                      PTHREAD_MUTEX_INITIALIZER };
 
+/**
+ * Return the list of thread metadata objects for all the threads known to
+ * threadscan.
+ */
 thread_list_t *threadscan_proc_get_thread_list () { return &thread_list; }
 
 /**
@@ -148,6 +152,9 @@ void threadscan_proc_stack_from_addr (mem_range_t *mem_range, size_t addr)
 /*                             Per-thread data                              */
 /****************************************************************************/
 
+/**
+ * Threads call this to register themselves with threadscan when they start.
+ */
 void threadscan_proc_add_thread_data (thread_data_t *td)
 {
     // The list initialization will only actually happen if this is the
@@ -156,11 +163,19 @@ void threadscan_proc_add_thread_data (thread_data_t *td)
     threadscan_util_thread_list_add(&thread_list, td);
 }
 
+/**
+ * Threads call this when they are going away.  It unregisters them with the
+ * threadscan.
+ */
 void threadscan_proc_remove_thread_data (thread_data_t *td)
 {
     threadscan_util_thread_list_remove(&thread_list, td);
 }
 
+/**
+ * Send a signal to all threads in the process (except the calling thread)
+ * using pthread_kill().
+ */
 int threadscan_proc_signal_all_except (int sig, thread_data_t *except)
 {
     int signal_count = 0;

@@ -27,10 +27,51 @@ THE SOFTWARE.
 #include <signal.h>
 
 /****************************************************************************/
-/*                       Storage for per-thread data.                       */
+/*                         Defines, typedefs, etc.                          */
 /****************************************************************************/
 
+#define FOREACH_IN_THREAD_LIST(td, tl) do { \
+    pthread_mutex_lock(&(tl)->lock);        \
+    (td) = (tl)->head;                      \
+    while (NULL != (td)) {
+
+#define ENDFOREACH_IN_THREAD_LIST(td, tl) (td) = (td)->next; }     \
+    pthread_mutex_unlock(&(tl)->lock);                             \
+    } while (0)
+
+#define FOREACH_BREAK_THREAD_LIST(tl) do {      \
+    pthread_mutex_unlock(&(tl)->lock);          \
+    } while (0)
+
+#define PAGESIZE ((size_t)0x1000)
+
+#define PAGEALIGN(addr) ((addr) & ~(PAGESIZE - 1))
+
+#define PTR_LIST_INDEXIFY(abs_idx)			\
+    ((abs_idx) & (g_threadscan_ptrs_per_thread - 1))
+
+#define MIN_OF(a, b) ((a) < (b) ? (a) : (b))
+
+#define BCAS(ptr, compare, swap)                        \
+    __sync_bool_compare_and_swap(ptr, compare, swap)
+
+#define _TIMESTAMP_MASK 0x7FFFFFFFFFFFFFFF
+#define _TIMESTAMP_FLAG 0x8000000000000000
+
+#define TIMESTAMP(field) ((field) & _TIMESTAMP_MASK)
+#define TIMESTAMP_RAISE_FLAG(field) ((field) | _TIMESTAMP_FLAG)
+#define TIMESTAMP_IS_ACTIVE(field) ((field) & _TIMESTAMP_FLAG)
+#define TIMESTAMP_SET_ACTIVE(field) TIMESTAMP_RAISE_FLAG(field)
+
 typedef struct thread_data_t thread_data_t;
+
+typedef struct thread_list_t thread_list_t;
+
+typedef struct mem_range_t mem_range_t;
+
+/****************************************************************************/
+/*                       Storage for per-thread data.                       */
+/****************************************************************************/
 
 struct thread_data_t {
 
@@ -51,9 +92,10 @@ struct thread_data_t {
     size_t *ptr_list;         // Local list of pointers to be collected.
 
     // The ptr_list is circular.  The following absolute indices show where
-    // to write new pointers, and the end.
-    unsigned long long ptr_list_write;
-    unsigned long long ptr_list_end;
+    // to write new pointers, and the end.  They are always increasing and
+    // INDEXIFY() is used to make the actual accesses.
+    unsigned long long idx_list_write;
+    unsigned long long idx_list_end;
 
     size_t local_timestamp;
     int times_without_update;
@@ -62,8 +104,6 @@ struct thread_data_t {
     // other threads are looking at it.
     int ref_count;
 };
-
-typedef struct thread_list_t thread_list_t;
 
 struct thread_list_t {
     thread_data_t *head;
@@ -81,24 +121,9 @@ void threadscan_util_thread_list_remove (thread_list_t *tl, thread_data_t *td);
 thread_data_t *threadscan_util_thread_list_find (thread_list_t *tl,
                                                  size_t addr);
 
-#define FOREACH_IN_THREAD_LIST(td, tl) do { \
-    pthread_mutex_lock(&(tl)->lock);        \
-    (td) = (tl)->head;                      \
-    while (NULL != (td)) {
-
-#define ENDFOREACH_IN_THREAD_LIST(td, tl) (td) = (td)->next; }     \
-    pthread_mutex_unlock(&(tl)->lock);                             \
-    } while (0)
-
-#define FOREACH_BREAK_THREAD_LIST(tl) do {      \
-    pthread_mutex_unlock(&(tl)->lock);          \
-    } while (0)
-
 /****************************************************************************/
 /*                 Memory range data for write protection.                  */
 /****************************************************************************/
-
-typedef struct mem_range_t mem_range_t;
 
 struct mem_range_t {
     size_t low;
@@ -118,29 +143,5 @@ void threadscan_fatal (const char *format, ...);
 
 void threadscan_util_randomize (size_t *addrs, int n);
 void threadscan_util_sort (size_t *a, int length);
-
-/****************************************************************************/
-/*                         Miscellaneous utilities.                         */
-/****************************************************************************/
-
-#define PAGESIZE ((size_t)0x1000)
-
-#define PAGEALIGN(addr) ((addr) & ~(PAGESIZE - 1))
-
-#define PTR_LIST_INDEXIFY(abs_idx)			\
-    ((abs_idx) & (threadscan_ptrs_per_thread - 1))
-
-#define MIN_OF(a, b) ((a) < (b) ? (a) : (b))
-
-#define BCAS(ptr, compare, swap)                        \
-    __sync_bool_compare_and_swap(ptr, compare, swap)
-
-#define _TIMESTAMP_MASK 0x7FFFFFFFFFFFFFFF
-#define _TIMESTAMP_FLAG 0x8000000000000000
-
-#define TIMESTAMP(field) ((field) & _TIMESTAMP_MASK)
-#define TIMESTAMP_RAISE_FLAG(field) ((field) | _TIMESTAMP_FLAG)
-#define TIMESTAMP_IS_ACTIVE(field) ((field) & _TIMESTAMP_FLAG)
-#define TIMESTAMP_SET_ACTIVE(field) TIMESTAMP_RAISE_FLAG(field)
 
 #endif // !defined _UTIL_H_

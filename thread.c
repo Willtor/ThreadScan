@@ -37,7 +37,7 @@ THE SOFTWARE.
 __thread thread_data_t *threadscan_local_td;
 
 /**
- * Return the local data for this thread.
+ * Return the local metadata for this thread.
  */
 thread_data_t *threadscan_thread_get_td () { return threadscan_local_td; }
 
@@ -87,7 +87,7 @@ void *threadscan_thread_base (void *arg)
 }
 
 /**
- * Do cleanup for the thread before it exits.
+ * Do metadata cleanup for the thread before it exits.
  */
 void threadscan_thread_cleanup ()
 {
@@ -174,6 +174,9 @@ void threadscan_thread_cleanup_raise_flag ()
     }
 }
 
+/**
+ * Lower the "helping" flag for this thread.
+ */
 void threadscan_thread_cleanup_lower_flag ()
 {
     thread_data_t *td = threadscan_local_td;
@@ -181,6 +184,9 @@ void threadscan_thread_cleanup_lower_flag ()
     td->local_timestamp = TIMESTAMP(td->local_timestamp);
 }
 
+/**
+ * Try to become the reclaimer.  Return true if successful, false otherwise.
+ */
 int threadscan_thread_cleanup_try_acquire ()
 {
     size_t old_timestamp = global_timestamp;
@@ -198,6 +204,9 @@ int threadscan_thread_cleanup_try_acquire ()
     return 1;
 }
 
+/**
+ * Give up reclaimer lock.
+ */
 void threadscan_thread_cleanup_release ()
 {
     global_timestamp = TIMESTAMP(global_timestamp);

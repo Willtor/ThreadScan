@@ -31,8 +31,16 @@ THE SOFTWARE.
 #include <stddef.h>
 #include "util.h"
 
+/**
+ * mmap() for the threadscan system.  This call never fails.  But you should
+ * only ever ask for big chunks in multiples of the page size.
+ * @return The allocated memory.
+ */
 void *threadscan_alloc_mmap (size_t size);
+
+/**
+ * munmap() for the threadscan system.
+ */
 void threadscan_alloc_munmap (void *ptr);
-mem_range_t threadscan_alloc_next_subrange (mem_range_t *big_range);
 
 #endif // !defined _ALLOC_H_

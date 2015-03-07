@@ -29,10 +29,18 @@ THE SOFTWARE.
 #include "util.h"
 
 /****************************************************************************/
+/*                         Defines, typedefs, etc.                          */
+/****************************************************************************/
+
+// Block size for allocating internal data structures.
+#define ALLOC_BLOCKSIZE PAGESIZE
+
+typedef struct memory_metadata_t memory_metadata_t;
+
+/****************************************************************************/
 /*                        Internal memory tracking.                         */
 /****************************************************************************/
 
-typedef struct memory_metadata_t memory_metadata_t;
 struct memory_metadata_t
 {
     void *addr;
@@ -47,8 +55,6 @@ static size_t LOW_ADDR (memory_metadata_t *m) {
 static size_t HIGH_ADDR (memory_metadata_t *m) {
     return LOW_ADDR(m) + m->length;
 }
-
-#define ALLOC_BLOCKSIZE PAGESIZE
 
 static memory_metadata_t *free_list = NULL;
 static memory_metadata_t *alloc_list = NULL;
@@ -71,6 +77,14 @@ static void *mmap_wrap (size_t size)
     }
     assert(ptr);
     return ptr;
+}
+
+/**
+ * Wrapper for munmap to be symetrical with mmap/mmap_wrap.
+ */
+int munmap_wrap (void *addr, size_t length)
+{
+    return munmap(addr, length);
 }
 
 /**
@@ -218,11 +232,13 @@ void *threadscan_alloc_mmap (size_t size)
  */
 void threadscan_alloc_munmap (void *ptr)
 {
+    assert(ptr);
+
     memory_metadata_t *meta = metadata_remove(ptr);
     if (NULL == meta) {
         threadscan_fatal("threadscan: lost track of memory.\n");
     }
-    if (0 != munmap(meta->addr, meta->length)) {
+    if (0 != munmap_wrap(meta->addr, meta->length)) {
         threadscan_fatal("threadscan: failed munmap().\n");
     }
     metadata_free(meta);

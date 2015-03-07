@@ -25,17 +25,62 @@ THE SOFTWARE.
 
 #include "util.h"
 
+/**
+ * Return the local metadata for this thread.
+ */
 thread_data_t *threadscan_thread_get_td ();
+
+/**
+ * Base routine of all threads that are created in the process.  The wrapper
+ * for pthread_create() will call this function instead of the one the user
+ * requested.  This allows us to hook each thread into the threadscan system
+ * as it is made.  Then we call the user routine.
+ */
 void *threadscan_thread_base (void *arg);
+
+/**
+ * Do metadata cleanup for the thread before it exits.
+ */
 void threadscan_thread_cleanup ();
+
+/**
+ * Send the given signal to all threads in the process and return the number
+ * of signals sent.
+ */
 int threadscan_thread_signal_all_but_me (int sig);
-void *threadscan_thread_call_on_safe_stack (void *(*f) (void *), void *arg);
+
+/**
+ * Return the address range of the stack where the user has (or might have)
+ * data.
+ */
 mem_range_t threadscan_thread_user_stack ();
+
+/**
+ * Save the stack pointer into the thread's data.  This is used when another
+ * thread wants to scan this thread's stack.  It can't scan the whole space
+ * because the space beyond the stack pointer is garbage data and we could
+ * generate false positives.
+ */
 void threadscan_thread_save_stack_ptr(size_t sp);
 
+/**
+ * Raise the "helping" flag for this thread.
+ */
 void threadscan_thread_cleanup_raise_flag ();
+
+/**
+ * Lower the "helping" flag for this thread.
+ */
 void threadscan_thread_cleanup_lower_flag ();
+
+/**
+ * Try to become the reclaimer.  Return true if successful, false otherwise.
+ */
 int threadscan_thread_cleanup_try_acquire ();
+
+/**
+ * Give up reclaimer lock.
+ */
 void threadscan_thread_cleanup_release ();
 
 #endif // !defined _THREAD_H_

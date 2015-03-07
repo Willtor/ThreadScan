@@ -33,35 +33,41 @@ THE SOFTWARE.
 #include "util.h"
 
 /****************************************************************************/
-/*                       Storage for per-thread data.                       */
+/*                         Defines, typedefs, etc.                          */
 /****************************************************************************/
 
+// Size of a per-thread metadata memory block.
 #define MEMBLOCK_SIZE PAGESIZE
+
+// FIXME: Are these actually used?
+static pthread_mutex_t g_staged_lock = PTHREAD_MUTEX_INITIALIZER;
+static thread_data_t *g_td_staged_to_free = NULL;
+
+/****************************************************************************/
+/*                       Storage for per-thread data.                       */
+/****************************************************************************/
 
 thread_data_t *threadscan_util_thread_data_new ()
 {
     char *memblock = (char*)threadscan_alloc_mmap(MEMBLOCK_SIZE);
     size_t *local_list =
-        (size_t*)threadscan_alloc_mmap(threadscan_ptrs_per_thread
+        (size_t*)threadscan_alloc_mmap(g_threadscan_ptrs_per_thread
                                         * sizeof(size_t));
     thread_data_t *td = (thread_data_t*)memblock;
     td->ptr_list = local_list;
-    td->ptr_list_write = 0;
-    td->ptr_list_end = threadscan_ptrs_per_thread;
+    td->idx_list_write = 0;
+    td->idx_list_end = g_threadscan_ptrs_per_thread;
     td->ref_count = 1;
     return td;
 }
 
-static pthread_mutex_t staged_lock = PTHREAD_MUTEX_INITIALIZER;
-static thread_data_t *td_staged_to_free = NULL;
-
 void threadscan_util_thread_data_decr_ref (thread_data_t *td)
 {
     if (0 == __sync_fetch_and_sub(&td->ref_count, 1) - 1) {
-        pthread_mutex_lock(&staged_lock);
-        td->next = td_staged_to_free;
-        td_staged_to_free = td;
-        pthread_mutex_unlock(&staged_lock);
+        pthread_mutex_lock(&g_staged_lock);
+        td->next = g_td_staged_to_free;
+        g_td_staged_to_free = td;
+        pthread_mutex_unlock(&g_staged_lock);
     }
 }
 
@@ -82,8 +88,8 @@ void threadscan_util_thread_data_cleanup (pthread_t tid)
     thread_data_t *td, *last = NULL;
 
     // Find the thread data and remove it from the list.
-    pthread_mutex_lock(&staged_lock);
-    td = td_staged_to_free;
+    pthread_mutex_lock(&g_staged_lock);
+    td = g_td_staged_to_free;
     assert(td);
     while (0 == pthread_equal(td->self, tid)) {
         last = td;
@@ -93,9 +99,9 @@ void threadscan_util_thread_data_cleanup (pthread_t tid)
     if (last) {
         last->next = td->next;
     } else {
-        td_staged_to_free = td->next;
+        g_td_staged_to_free = td->next;
     }
-    pthread_mutex_unlock(&staged_lock);
+    pthread_mutex_unlock(&g_staged_lock);
 
     if (td->ref_count > 0) {
         threadscan_fatal("threadscan: "
