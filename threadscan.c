@@ -40,6 +40,9 @@ THE SOFTWARE.
 
 #define SIGTHREADSCAN SIGUSR1
 
+#define REFS_OFFSET 0
+#define SCAN_MAP_OFFSET 1
+
 #define PTR_MASK(v) ((v) & ~3) // Mask off the low two bits.
 
 #ifndef NDEBUG
@@ -134,8 +137,9 @@ static volatile int self_stacks_searched = 1;
 static void assign_working_space (char *buf)
 {
     g_tsdata.buf_addrs = (size_t*)buf;
-    g_tsdata.refs = (int*)(buf + g_tsdata.offset_list[0]);
-    g_tsdata.buf_scan_map = (size_t*)(buf + g_tsdata.offset_list[1]);
+    g_tsdata.refs = (int*)(buf + g_tsdata.offset_list[REFS_OFFSET]);
+    g_tsdata.buf_scan_map =
+        (size_t*)(buf + g_tsdata.offset_list[SCAN_MAP_OFFSET]);
 }
 
 /**
@@ -520,7 +524,7 @@ static void register_signal_handlers ()
     }
 
     g_tsdata.max_ptrs = g_threadscan_ptrs_per_thread
-        * g_threadscan_max_thread_count;
+        * MAX_THREAD_COUNT;
 
     // Figure out how big the scan map needs to be.  It should be large
     // enough to store one pointer for every page in the main buffer of
@@ -539,11 +543,11 @@ static void register_signal_handlers ()
 
     // Reserve space for buf_addrs.
     g_tsdata.working_buffer_sz = g_tsdata.max_ptrs * sizeof(size_t) * 2;
-    g_tsdata.offset_list[0] = g_tsdata.working_buffer_sz;
+    g_tsdata.offset_list[REFS_OFFSET] = g_tsdata.working_buffer_sz;
 
     // Reserve space for the references (refs).
     g_tsdata.working_buffer_sz += g_tsdata.max_ptrs * sizeof(int) * 2;
-    g_tsdata.offset_list[1] = g_tsdata.working_buffer_sz;
+    g_tsdata.offset_list[SCAN_MAP_OFFSET] = g_tsdata.working_buffer_sz;
 
     // Reserve space for the scan map.
     g_tsdata.working_buffer_sz += scan_map_sz;

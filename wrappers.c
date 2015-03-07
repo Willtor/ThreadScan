@@ -25,6 +25,7 @@ THE SOFTWARE.
 #include "alloc.h"
 #include <assert.h>
 #include <dlfcn.h>
+#include "env.h"
 #include "proc.h"
 #include <pthread.h>
 #include <stdlib.h>
@@ -55,6 +56,12 @@ typedef int (*__libc_start_main_t)(int (*) (int, char **, char **),
 typedef int (*main_t) (int, char **, char **);
 
 /****************************************************************************/
+/*                                 Globals.                                 */
+/****************************************************************************/
+
+static int g_thread_count = 1;
+
+/****************************************************************************/
 /*                            Wrapped functions.                            */
 /****************************************************************************/
 
@@ -81,6 +88,12 @@ int pthread_create (pthread_t *thread,
     size_t stacksize;
 
     assert(orig_pthread_create);
+
+    if (MAX_THREAD_COUNT < __sync_fetch_and_add(&g_thread_count, 1)) {
+        // Don't overflow buffers.
+        threadscan_fatal("Exceeded maximum thread count (%d).\n",
+                         MAX_THREAD_COUNT);
+    }
 
     // Wrap the user data.
     td = threadscan_util_thread_data_new();
@@ -146,7 +159,9 @@ __attribute__((visibility("default"), noreturn))
 void pthread_exit (void *retval)
 {
     assert(orig_pthread_exit);
+
     threadscan_thread_cleanup();
+    __sync_fetch_and_sub(&g_thread_count, 1);
     orig_pthread_exit(retval);
 
     abort(); // Should never get past orig_pthread_exit();

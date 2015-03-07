@@ -23,13 +23,11 @@ THE SOFTWARE.
 #ifndef _ENV_H_
 #define _ENV_H_ 1
 
+#define MAX_THREAD_COUNT 128
+
 // # of ptrs a thread can "save up" before initiating a collection run.
 // The number of pointers per thread should be a power of 2 because we use
 // this number to do masking (to avoid the costly modulo operation).
 extern int g_threadscan_ptrs_per_thread;
-
-// Configurable maximum supported threads.  Exceeding this value in practice
-// leads to undefined behavior.
-extern int g_threadscan_max_thread_count;
 
 #endif // !defined _ENV_H_

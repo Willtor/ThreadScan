@@ -198,7 +198,7 @@ void threadscan_fatal (const char *format, ...)
     va_end(arg);
 
     assert(0);
-    //exit(1);
+    exit(1);
 }
 
 /****************************************************************************/
