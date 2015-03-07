@@ -177,25 +177,14 @@ static void store_remaining_addrs (size_t *addrs, int n)
  */
 static void add_to_buf_addrs (int *n, size_t *buf, int max)
 {
-    int i;
-
     if (*n + max > g_tsdata.max_ptrs * 2) {
         threadscan_diagnostic("*n = %d, max = %d\n", *n, max);
         threadscan_fatal("threadscan internal error: "
                          "overflowed address list.\n");
     }
 
-    // FIXME: This should be a memcpy(), by all rights.
-    for (i = 0; i < max; ++i, ++*n) {
-        g_tsdata.buf_addrs[*n] = buf[i];
-        if (g_tsdata.buf_addrs[*n] == 0) {
-            // Don't add zeroes, if it can be helped.
-            --*n;
-        } else {
-            BCAS(&buf[i], g_tsdata.buf_addrs[*n], 0);
-        }
-        assert(g_tsdata.refs[*n] == 0);
-    }
+    memcpy(&g_tsdata.buf_addrs[*n], buf, max * sizeof(size_t));
+    *n += max;
 }
 
 static int generate_working_pointers_list ()
@@ -276,16 +265,16 @@ static int iterative_search (size_t val, size_t *a, int min, int max)
 
 static int binary_search (size_t val, size_t *a, int min, int max)
 {
-    if (max - min < BINARY_THRESHOLD) {
-        return iterative_search(val, a, min, max);
+    while (max - min >= BINARY_THRESHOLD) {
+        int mid = (max + min) / 2;
+        size_t cmp = a[mid];
+        if (cmp == val) return mid;
+
+        if (cmp > val) max = mid;
+        else min = mid;
     }
 
-    // FIXME: Do manual tail-recursion.
-    int mid = (max + min) / 2;
-    size_t cmp = a[mid];
-    if (cmp == val) return mid;
-    if (cmp > val) return binary_search(val, a, min, mid);
-    return binary_search(val, a, mid, max);
+    return iterative_search(val, a, min, max);
 }
 
 static void add_ptr (thread_data_t *td, size_t sptr)
@@ -380,10 +369,10 @@ static int handle_unreferenced_ptrs (size_t *addrs, int *refs, int count)
         } else if (i != write_position) {
             addrs[write_position] = addrs[i];
             addrs[i] = 0;
+            ++write_position;
         }
     }
 
-    // FIXME: write_position is not being updated!
     return write_position;
 }
 
@@ -511,12 +500,8 @@ static void signal_handler (int sig)
     size_t rsp;
     assert(SIGTHREADSCAN == sig);
 
-    __asm__("movq %%rsp, %0"
-            : "=m"(rsp)
-            : "r"("%rsp")
-            : );
+    GET_STACK_POINTER(rsp);
 
-    threadscan_thread_save_stack_ptr(rsp);
     threadscan_thread_cleanup_raise_flag(); // FIXME: Do we need timestamps?
     search_self_stack((void*)rsp);
     threadscan_thread_cleanup_lower_flag();

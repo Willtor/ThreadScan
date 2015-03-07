@@ -84,7 +84,6 @@ struct thread_data_t {
     pthread_t self;           // That's me!
     char *user_stack_low;     // Low address on the user stack.
     char *user_stack_high;    // Actually, just the high address to lock.
-    size_t saved_sp;          // Saved stack pointer after jump.
 
     int stack_is_ours;        // Whether threadscan allocated the stack.
     int is_active;            // The thread is running user code.

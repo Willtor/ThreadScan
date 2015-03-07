@@ -56,14 +56,6 @@ int threadscan_thread_signal_all_but_me (int sig);
 mem_range_t threadscan_thread_user_stack ();
 
 /**
- * Save the stack pointer into the thread's data.  This is used when another
- * thread wants to scan this thread's stack.  It can't scan the whole space
- * because the space beyond the stack pointer is garbage data and we could
- * generate false positives.
- */
-void threadscan_thread_save_stack_ptr(size_t sp);
-
-/**
  * Raise the "helping" flag for this thread.
  */
 void threadscan_thread_cleanup_raise_flag ();
