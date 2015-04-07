@@ -24,6 +24,7 @@ THE SOFTWARE.
 #define _UTIL_H_
 
 #include <pthread.h>
+#include "queue.h"
 #include <signal.h>
 
 /****************************************************************************/
@@ -47,9 +48,6 @@ THE SOFTWARE.
 
 #define PAGEALIGN(addr) ((addr) & ~(PAGESIZE - 1))
 
-#define PTR_LIST_INDEXIFY(abs_idx)			\
-    ((abs_idx) & (g_threadscan_ptrs_per_thread - 1))
-
 #define MIN_OF(a, b) ((a) < (b) ? (a) : (b))
 
 #define BCAS(ptr, compare, swap)                        \
@@ -63,11 +61,20 @@ THE SOFTWARE.
 #define TIMESTAMP_IS_ACTIVE(field) ((field) & _TIMESTAMP_FLAG)
 #define TIMESTAMP_SET_ACTIVE(field) TIMESTAMP_RAISE_FLAG(field)
 
+typedef struct mem_range_t mem_range_t;
+
 typedef struct thread_data_t thread_data_t;
 
 typedef struct thread_list_t thread_list_t;
 
-typedef struct mem_range_t mem_range_t;
+/****************************************************************************/
+/*                 Memory range data for write protection.                  */
+/****************************************************************************/
+
+struct mem_range_t {
+    size_t low;
+    size_t high;
+};
 
 /****************************************************************************/
 /*                       Storage for per-thread data.                       */
@@ -88,16 +95,12 @@ struct thread_data_t {
     int stack_is_ours;        // Whether threadscan allocated the stack.
     int is_active;            // The thread is running user code.
 
-    size_t *ptr_list;         // Local list of pointers to be collected.
-
-    // The ptr_list is circular.  The following absolute indices show where
-    // to write new pointers, and the end.  They are always increasing and
-    // INDEXIFY() is used to make the actual accesses.
-    unsigned long long idx_list_write;
-    unsigned long long idx_list_end;
+    queue_t ptr_list;         // Local list of pointers to be collected.
 
     size_t local_timestamp;
     int times_without_update;
+
+    mem_range_t local_block;  // Non-stack memory local to this thread.
 
     // Reference count prevents premature free'ing of the structure while
     // other threads are looking at it.
@@ -119,15 +122,6 @@ void threadscan_util_thread_list_add (thread_list_t *tl, thread_data_t *td);
 void threadscan_util_thread_list_remove (thread_list_t *tl, thread_data_t *td);
 thread_data_t *threadscan_util_thread_list_find (thread_list_t *tl,
                                                  size_t addr);
-
-/****************************************************************************/
-/*                 Memory range data for write protection.                  */
-/****************************************************************************/
-
-struct mem_range_t {
-    size_t low;
-    size_t high;
-};
 
 /****************************************************************************/
 /*                              I/O functions.                              */

@@ -54,9 +54,9 @@ thread_data_t *threadscan_util_thread_data_new ()
         (size_t*)threadscan_alloc_mmap(g_threadscan_ptrs_per_thread
                                         * sizeof(size_t));
     thread_data_t *td = (thread_data_t*)memblock;
-    td->ptr_list = local_list;
-    td->idx_list_write = 0;
-    td->idx_list_end = g_threadscan_ptrs_per_thread;
+    threadscan_queue_init(&td->ptr_list, local_list,
+                          g_threadscan_ptrs_per_thread);
+    td->local_block.low = td->local_block.high = 0;
     td->ref_count = 1;
     return td;
 }
@@ -78,7 +78,7 @@ void threadscan_util_thread_data_free (thread_data_t *td)
 
     // FIXME: Should do something about any possible remaining pointers in this
     // thread's ptr_list!  Right now, they're getting leaked.
-    threadscan_alloc_munmap(td->ptr_list);
+    threadscan_alloc_munmap(td->ptr_list.e);
 
     threadscan_alloc_munmap(td);
 }

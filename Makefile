@@ -4,7 +4,7 @@ THREADSCAN = libthreadscan.so
 MAIN	= main
 TARGETS	= $(THREADSCAN) $(MAIN)
 
-THREADSCAN_SRC = env.c wrappers.c alloc.c util.c thread.c	\
+THREADSCAN_SRC = queue.c env.c wrappers.c alloc.c util.c thread.c	\
 	proc.c threadscan.c
 THREADSCAN_OBJ = $(THREADSCAN_SRC:.c=.o)
 

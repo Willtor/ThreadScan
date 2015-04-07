@@ -53,8 +53,8 @@ static void assert_monotonicity (size_t *a, int n)
     for (i = 0; i < n; ++i) {
         if (a[i] <= last) {
             threadscan_fatal("The list is not monotonic at position %d "
-                             "out of %d\n",
-                             i, n);
+                             "out of %d (%llu, last: %llu)\n",
+                             i, n, a[i], last);
         }
         last = a[i];
     }
@@ -79,7 +79,7 @@ typedef struct threadscan_data_t threadscan_data_t;
 
 typedef struct addr_storage_t addr_storage_t;
 
-typedef struct do_cleanup_arg_t do_cleanup_arg_t;
+typedef struct do_reclaim_arg_t do_reclaim_arg_t;
 
 struct threadscan_data_t {
     int max_ptrs; // Max pointer count that can be tracked during reclamation.
@@ -112,7 +112,7 @@ struct addr_storage_t {
     size_t addrs[];
 };
 
-struct do_cleanup_arg_t {
+struct do_reclaim_arg_t {
     // Return values:
     size_t *addrs;
     int *refs;
@@ -125,6 +125,9 @@ struct do_cleanup_arg_t {
 
 __attribute__((visibility("default")))
 void threadscan_collect (void *ptr);
+
+__attribute__((visibility("default")))
+void threadscan_register_local_block (void *addr, size_t size);
 
 static threadscan_data_t g_tsdata;
 
@@ -211,34 +214,9 @@ static int generate_working_pointers_list ()
     // Add the pointers from each of the individual thread buffers.
     FOREACH_IN_THREAD_LIST(td, thread_list)
         assert(td);
-        if (td->idx_list_write
-            > td->idx_list_end - g_threadscan_ptrs_per_thread) {
-            // Pointers to be collected.
-            int idx_list_write = td->idx_list_write;
-            int write_idx = PTR_LIST_INDEXIFY(idx_list_write);
-            int start_idx = PTR_LIST_INDEXIFY(td->idx_list_end
-                                              - g_threadscan_ptrs_per_thread);
-            int elements;
-            // The following is just copying out of the buffer.  Since the
-            // buffer is circular, there is the possibility that the start
-            // point is actually ahead of the write pointer.
-            if (write_idx <= start_idx) {
-                elements = g_threadscan_ptrs_per_thread - start_idx;
-                memcpy(&g_tsdata.buf_addrs[n], &td->ptr_list[start_idx],
-                       elements * sizeof(size_t));
-                n += elements;
-                start_idx = 0;
-            }
-            elements = write_idx - start_idx;
-            if (elements > 0) {
-                memcpy(&g_tsdata.buf_addrs[n], &td->ptr_list[start_idx],
-                       elements * sizeof(size_t));
-                n += elements;
-            }
-            // Set the end [absolute] index so the owner of this data can
-            // continue adding pointers.
-            td->idx_list_end = idx_list_write + g_threadscan_ptrs_per_thread;
-        }
+        n += threadscan_queue_pop_bulk(&g_tsdata.buf_addrs[n],
+                                       g_tsdata.max_ptrs * 2 - n,
+                                       &td->ptr_list);
     ENDFOREACH_IN_THREAD_LIST(td, thread_list);
 
     return n;
@@ -279,17 +257,6 @@ static int binary_search (size_t val, size_t *a, int min, int max)
     }
 
     return iterative_search(val, a, min, max);
-}
-
-static void add_ptr (thread_data_t *td, size_t sptr)
-{
-    assert(td);
-    assert(td->ptr_list);
-    assert(td->idx_list_end != td->idx_list_write);
-
-    // Insert the pointer into the circular buffer.
-    td->ptr_list[PTR_LIST_INDEXIFY(td->idx_list_write)] = sptr;
-    ++td->idx_list_write;
 }
 
 /****************************************************************************/
@@ -384,11 +351,12 @@ static int handle_unreferenced_ptrs (size_t *addrs, int *refs, int count)
 /*                             Cleanup thread.                              */
 /****************************************************************************/
 
-static void do_cleanup (size_t rsp, do_cleanup_arg_t *do_cleanup_arg)
+static void do_reclaim (size_t rsp, do_reclaim_arg_t *do_reclaim_arg)
 {
     int sig_count;
     mem_range_t user_stack = threadscan_thread_user_stack();
     mem_range_t stack_search_range = { rsp, user_stack.high };
+    mem_range_t *local_block = &threadscan_thread_get_td()->local_block;
 
     // Signal all of the threads that a scan is about to happen.
     self_stacks_searched = 0;
@@ -397,19 +365,24 @@ static void do_cleanup (size_t rsp, do_cleanup_arg_t *do_cleanup_arg)
     // Check my stack for references.
     search_range(&stack_search_range);
 
+    // Search the local region, if it's been set.
+    if (local_block->low > 0) {
+        search_range(local_block);
+    }
+
     while (self_stacks_searched < sig_count) {
         __sync_synchronize(); // mfence.
     }
 
-    do_cleanup_arg->addrs = g_tsdata.buf_addrs;
-    do_cleanup_arg->refs = g_tsdata.refs;
-    do_cleanup_arg->count = g_tsdata.n_addrs;
+    do_reclaim_arg->addrs = g_tsdata.buf_addrs;
+    do_reclaim_arg->refs = g_tsdata.refs;
+    do_reclaim_arg->count = g_tsdata.n_addrs;
 }
 
-static void threadscan_cleanup ()
+static void threadscan_reclaim ()
 {
     size_t rsp;
-    do_cleanup_arg_t do_cleanup_arg;
+    do_reclaim_arg_t do_reclaim_arg;
     void *working_memory;
 
     GET_STACK_POINTER(rsp);
@@ -417,7 +390,6 @@ static void threadscan_cleanup ()
     working_memory = threadscan_alloc_mmap(g_tsdata.working_buffer_sz);
     assign_working_space(working_memory);
     g_tsdata.n_addrs = generate_working_pointers_list();
-    //threadscan_diagnostic("Starting with %d\n", g_tsdata.n_addrs);
 
     // Sort the pointers and remove duplicates.
     threadscan_util_sort(g_tsdata.buf_addrs, g_tsdata.n_addrs);
@@ -428,22 +400,21 @@ static void threadscan_cleanup ()
     // if it's there at all.
     generate_scan_map();
 
-    do_cleanup(rsp, &do_cleanup_arg);
+    do_reclaim(rsp, &do_reclaim_arg);
     threadscan_thread_cleanup_release();
 
     // Check for pointers to free.  w00t!
-    assert_monotonicity(do_cleanup_arg.addrs, do_cleanup_arg.count);
+    assert_monotonicity(do_reclaim_arg.addrs, do_reclaim_arg.count);
     int remaining =
-        handle_unreferenced_ptrs(do_cleanup_arg.addrs,
-                                 do_cleanup_arg.refs,
-                                 do_cleanup_arg.count);
-    //threadscan_diagnostic("Remaining: %d\n", remaining);
+        handle_unreferenced_ptrs(do_reclaim_arg.addrs,
+                                 do_reclaim_arg.refs,
+                                 do_reclaim_arg.count);
 
     // There may be some remaining pointers that could not be free'd.  They
     // should be stored for the next round, and will be searched again until
     // there are no outstanding references to them.
-    threadscan_util_randomize(do_cleanup_arg.addrs, remaining);
-    store_remaining_addrs(do_cleanup_arg.addrs, remaining);
+    threadscan_util_randomize(do_reclaim_arg.addrs, remaining);
+    store_remaining_addrs(do_reclaim_arg.addrs, remaining);
 }
 
 /**
@@ -461,16 +432,28 @@ void threadscan_collect (void *ptr)
     }
 
     thread_data_t *td = threadscan_thread_get_td();
-    add_ptr(td, (size_t)ptr);
-    while (td->idx_list_write == td->idx_list_end) {
+    threadscan_queue_push(&td->ptr_list, (size_t)ptr); // Add the pointer.
+    while (threadscan_queue_is_full(&td->ptr_list)) {
         // While this thread's local queue of pointers is full, try to cleanup
         // or help with cleanup.  If someone else has already started cleanup,
         // this thread will break out of this loop soon enough.
 
         threadscan_thread_cleanup_try_acquire()
-            ? threadscan_cleanup() // cleanup() will release the cleanup lock.
+            ? threadscan_reclaim() // reclaim() will release the cleanup lock.
             : pthread_yield();
     }
+}
+
+__attribute__((visibility("default")))
+void threadscan_register_local_block (void *addr, size_t size)
+{
+    mem_range_t *local_block = &threadscan_thread_get_td()->local_block;
+    local_block->high = (size_t)addr + size;
+
+    // Set "low" last.  This is for safety -- if a thread is setting this value
+    // when a reclamation happens, it will check the "low" value, and if it
+    // hasn't been set, there's no chance of funky reads.
+    local_block->low = (size_t)addr;
 }
 
 /****************************************************************************/
@@ -485,11 +468,19 @@ static void *search_self_stack (void *arg)
 {
     mem_range_t user_stack = threadscan_thread_user_stack();
     mem_range_t stack_search_range = { (size_t)arg, user_stack.high };
+    mem_range_t *local_block = &threadscan_thread_get_td()->local_block;
 
     assert(arg);
 
     // Search the stack for incriminating references.
     search_range(&stack_search_range);
+
+    // Search the local region, if it's been set.
+    if (local_block->low > 0) {
+        search_range(local_block);
+    }
+
+    // Mark this thread done.
     __sync_fetch_and_add(&self_stacks_searched, 1);
 
     // Go back to work.
