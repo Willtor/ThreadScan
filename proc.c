@@ -89,7 +89,7 @@ static int read_mapline (FILE *fp, mapline_t *m)
 
     if (feof(fp)) return 0;
 
-    n = fscanf(fp, "%llx-%llx %s %llx %d:%d %d",
+    n = fscanf(fp, "%llx-%llx %s %llx %x:%x %d",
                &m->range_begin, &m->range_end, m->bits, &m->f1,
                &m->f2, &m->f3, &m->f4);
 
