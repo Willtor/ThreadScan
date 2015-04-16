@@ -40,10 +40,14 @@ THE SOFTWARE.
 
 #define SIGTHREADSCAN SIGUSR1
 
-#define REFS_OFFSET 0
-#define SCAN_MAP_OFFSET 1
+#define SCAN_MAP_OFFSET 0
 
 #define PTR_MASK(v) ((v) & ~3) // Mask off the low two bits.
+
+#define SET_LOW_BIT(p) do {                      \
+        size_t v = (size_t)*(p);                 \
+        if ((v & 1) == 0) { *(p) = (v + 1); }    \
+    } while (0)
 
 #ifndef NDEBUG
 static void assert_monotonicity (size_t *a, int n)
@@ -87,7 +91,6 @@ struct threadscan_data_t {
     // Addresses being tracked for reclamation.
     int n_addrs;
     size_t *buf_addrs;
-    int *refs;
 
     // Scan map is a mini-map of buf_addrs.  One element in the scan map
     // corresponds to a page of addresses in buf_addrs.
@@ -115,7 +118,6 @@ struct addr_storage_t {
 struct do_reclaim_arg_t {
     // Return values:
     size_t *addrs;
-    int *refs;
     int count;
 };
 
@@ -140,7 +142,6 @@ static volatile int self_stacks_searched = 1;
 static void assign_working_space (char *buf)
 {
     g_tsdata.buf_addrs = (size_t*)buf;
-    g_tsdata.refs = (int*)(buf + g_tsdata.offset_list[REFS_OFFSET]);
     g_tsdata.buf_scan_map =
         (size_t*)(buf + g_tsdata.offset_list[SCAN_MAP_OFFSET]);
 }
@@ -281,11 +282,10 @@ static void do_search (size_t *mem, size_t range_size)
 
         if (cmp < min_ptr || cmp > max_ptr) continue;
         if (min_ptr == cmp) {
-            __sync_fetch_and_add(&g_tsdata.refs[0], 1);
+            SET_LOW_BIT(&g_tsdata.buf_addrs[0]);
             continue;
         } else if (max_ptr == cmp) {
-            __sync_fetch_and_add(&g_tsdata.refs
-                                 [g_tsdata.n_addrs - 1], 1);
+            SET_LOW_BIT(&g_tsdata.buf_addrs[g_tsdata.n_addrs - 1]);
             continue;
         }
 
@@ -299,7 +299,7 @@ static void do_search (size_t *mem, size_t range_size)
                                 ? g_tsdata.n_addrs
                                 : (v + 1) * (PAGESIZE / sizeof(size_t)));
         if (g_tsdata.buf_addrs[loc] == cmp) {
-            __sync_fetch_and_add(&g_tsdata.refs[loc], 1);
+            SET_LOW_BIT(&g_tsdata.buf_addrs[loc]);
         }
 #ifndef NDEBUG
         else {
@@ -327,20 +327,20 @@ static void search_range (mem_range_t *mem_range)
 /*                           Post-search analysis                           */
 /****************************************************************************/
 
-static int handle_unreferenced_ptrs (size_t *addrs, int *refs, int count)
+static int handle_unreferenced_ptrs (size_t *addrs, int count)
 {
     int write_position;
     int i;
 
     write_position = 0;
     for (i = 0; i < count; ++i) {
-        if (refs[i] == 0) {
-            free((void*)addrs[i]);
-            addrs[i] = 0;
-        } else if (i != write_position) {
-            addrs[write_position] = addrs[i];
+        if (addrs[i] & 1) {              // Outstanding reference.
+            addrs[write_position] = PTR_MASK(addrs[i]);
             addrs[i] = 0;
             ++write_position;
+        } else {                         // No remaining references.
+            free((void*)addrs[i]);
+            addrs[i] = 0;
         }
     }
 
@@ -375,7 +375,6 @@ static void do_reclaim (size_t rsp, do_reclaim_arg_t *do_reclaim_arg)
     }
 
     do_reclaim_arg->addrs = g_tsdata.buf_addrs;
-    do_reclaim_arg->refs = g_tsdata.refs;
     do_reclaim_arg->count = g_tsdata.n_addrs;
 }
 
@@ -407,7 +406,6 @@ static void threadscan_reclaim ()
     assert_monotonicity(do_reclaim_arg.addrs, do_reclaim_arg.count);
     int remaining =
         handle_unreferenced_ptrs(do_reclaim_arg.addrs,
-                                 do_reclaim_arg.refs,
                                  do_reclaim_arg.count);
 
     // There may be some remaining pointers that could not be free'd.  They
@@ -534,10 +532,6 @@ static void register_signal_handlers ()
 
     // Reserve space for buf_addrs.
     g_tsdata.working_buffer_sz = g_tsdata.max_ptrs * sizeof(size_t) * 2;
-    g_tsdata.offset_list[REFS_OFFSET] = g_tsdata.working_buffer_sz;
-
-    // Reserve space for the references (refs).
-    g_tsdata.working_buffer_sz += g_tsdata.max_ptrs * sizeof(int) * 2;
     g_tsdata.offset_list[SCAN_MAP_OFFSET] = g_tsdata.working_buffer_sz;
 
     // Reserve space for the scan map.
