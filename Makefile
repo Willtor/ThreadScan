@@ -1,8 +1,7 @@
 CXX 	= gcc -g
 
 THREADSCAN = libthreadscan.so
-MAIN	= main
-TARGETS	= $(THREADSCAN) $(MAIN)
+TARGETS	= $(THREADSCAN)
 
 THREADSCAN_SRC = queue.c env.c wrappers.c alloc.c util.c thread.c	\
 	proc.c threadscan.c
@@ -21,14 +20,8 @@ all:	$(TARGETS)
 debug:
 	DEBUG=1 make all
 
-test:	$(TARGETS)
-	LD_BIND_NOW=1 LD_PRELOAD="$$PWD/$(THREADSCAN)" ./$(MAIN)
-
 $(THREADSCAN): $(THREADSCAN_OBJ)
 	$(CXX) $(CFLAGS) -shared -Wl,-soname,$@ -o $@ $^ $(LDFLAGS)
-
-$(MAIN): main.c $(THREADSCAN)
-	gcc -o $@ $< -L. -lthreadscan -pthread
 
 clean:
 	rm -f *.o $(TARGETS) core
