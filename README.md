@@ -24,7 +24,7 @@ ThreadScan can be used in another code base by calling the collection function f
 extern void threadscan_collect (void *);
 ```
 
-***threadscan_collect*** can be used on any pointer for which 1. the only remaining references exist on thread stacks or in active registers, and 2. ***threadscan_collect*** is not called multiple times on the same node.
+***threadscan_collect*** can be used to automate memory reclamation on any pointer for which 1. the only remaining references exist on thread stacks or in active registers, and 2. ***threadscan_collect*** is not called multiple times on the same node.
 
 For example, a lock-free linked list swings the previous node's next pointer, and the node is no longer reachable from the root.  Provided the pointer to the node has not been stored somewhere else, the node now meets the first criterion.  If the call to ***threadscan_collect*** only occurs after the CAS that removes the node, the second criterion is met, too.
 
@@ -34,11 +34,21 @@ To include the library in your build, place the library in some directory, /exam
 -L/example/path -lthreadscan
 ```
 
+ThreadScan may also be used in semi-automated mode.  If a thread uses a buffer that is not on the stack, but is still functionally local to that one thread, ThreadScan can be configured to search that space, too.
+
+```
+extern void threadscan_register_local_block (void *addr, size_t size);
+```
+
+Add this declaration to your code and call it with a pointer to the buffer and its size when the thread starts.  The identified region will be scanned along with the stack when reclamation occurs.
+
 ## Recommendations
 
 + Use TC-Malloc or Hoard, which are known to be fast allocators in multi-threaded code.  TC-Malloc is available at https://code.google.com/p/gperftools/
 + If you install libthreadscan.so somewhere that requires you to use LD_PRELOAD, specify TC-Malloc, first, so that ThreadScan will find its ***free*** before that of the default Linux malloc (PT-Malloc).  Mixing ***malloc*** and ***free*** calls from different libraries can cause the program to crash.
 
-## Bugs/Questions
+## Bugs/Questions/Contributions
 
 You can contact the maintainer, William M. Leiserson, at willtor@mit.edu.
+
+We appreciate contributions of bug fixes, features, etc.  If you would like to contribute, please read the MIT License (LICENSE) carefully to be sure you agree to the terms under which this library is released.  If your name doesn't appear in the AUTHORS file, you can append your name to the list of authors along with your changes.

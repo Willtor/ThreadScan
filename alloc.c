@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2015 William M. Leiserson <willtor@mit.edu>
+Copyright (c) 2015 ThreadScan authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
