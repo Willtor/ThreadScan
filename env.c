@@ -53,7 +53,7 @@ static void env_init ()
     {
         int ptrs_per_thread;
         // Default is ~16000 pointers per thread, derived from trial data.
-        ptrs_per_thread = get_int(getenv(env_ptrs_per_thread), 16);
+        ptrs_per_thread = get_int(getenv(env_ptrs_per_thread), 4);
         ptrs_per_thread *= 1024;
 
         // Round up to power of 2 bit trick:

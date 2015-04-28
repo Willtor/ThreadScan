@@ -23,7 +23,7 @@ THE SOFTWARE.
 #ifndef _ENV_H_
 #define _ENV_H_ 1
 
-#define MAX_THREAD_COUNT 128
+#define MAX_THREAD_COUNT 256
 
 // # of ptrs a thread can "save up" before initiating a collection run.
 // The number of pointers per thread should be a power of 2 because we use
