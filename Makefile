@@ -1,5 +1,7 @@
 CXX 	= gcc -g
 
+INSTALL_DIR = /usr/local
+
 THREADSCAN = libthreadscan.so
 TARGETS	= $(THREADSCAN)
 
@@ -22,6 +24,15 @@ debug:
 
 $(THREADSCAN): $(THREADSCAN_OBJ)
 	$(CXX) $(CFLAGS) -shared -Wl,-soname,$@ -o $@ $^ $(LDFLAGS)
+
+$(INSTALL_DIR)/lib/$(THREADSCAN): $(THREADSCAN)
+	cp $< $@
+
+$(INSTALL_DIR)/include/threadscan.h: include/threadscan.h
+	cp $< $@
+
+install: $(INSTALL_DIR)/lib/$(THREADSCAN) $(INSTALL_DIR)/include/threadscan.h
+	ldconfig
 
 clean:
 	rm -f *.o $(TARGETS) core
