@@ -23,6 +23,10 @@ THE SOFTWARE.
 #ifndef _THREADSCAN_H_
 #define _THREADSCAN_H_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Submit a pointer for memory reclamation.  threadscan_collect() will call
  * free() on the pointer, itself, when there are no more outstanding
@@ -37,5 +41,9 @@ extern void threadscan_collect (void *ptr);
  * call ThreadScan will search only the thread stacks.
  */
 extern void threadscan_register_local_block (void *addr, size_t size);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
 #endif // !defined _THREADSCAN_H_
