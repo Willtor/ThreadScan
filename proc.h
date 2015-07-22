@@ -38,6 +38,17 @@ thread_list_t *threadscan_proc_get_thread_list ();
  */
 void threadscan_proc_stack_from_addr (mem_range_t *mem_range, size_t addr);
 
+/**
+ * Iterate over the memory map, applying *f to each range.  *f can cause this
+ * function to exit early by returning 0.
+ */
+void threadscan_proc_map_iterate (int (*f) (void *arg,
+                                            size_t begin,
+                                            size_t end,
+                                            const char *bits,
+                                            const char *path),
+                                  void *user_arg);
+
 /****************************************************************************/
 /*                             Per-thread data                              */
 /****************************************************************************/
@@ -58,6 +69,11 @@ void threadscan_proc_remove_thread_data (thread_data_t *td);
  * using pthread_kill().
  */
 int threadscan_proc_signal_all_except (int sig, thread_data_t *except);
+
+/**
+ * Send a signal to all threads in the process using pthread_kill().
+ */
+int threadscan_proc_signal (int sig);
 
 /**
  * Wait for all threads that are trying to help out to discover the

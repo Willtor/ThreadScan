@@ -41,7 +41,7 @@ THE SOFTWARE.
  * contains data the OS keeps around about mmap()'d ranges of memory.
  */
 
-#define MAPLINE_LOCATION_SIZE 256
+#define MAPLINE_PATH_SIZE 256
 
 typedef struct mapline_t mapline_t;
 
@@ -51,7 +51,7 @@ struct mapline_t {
     unsigned long long f1;
     unsigned int f2, f3;
     unsigned int f4;
-    char location[MAPLINE_LOCATION_SIZE];
+    char path[MAPLINE_PATH_SIZE];
 };
 
 /****************************************************************************/
@@ -93,7 +93,7 @@ static int read_mapline (FILE *fp, mapline_t *m)
                &m->range_begin, &m->range_end, m->bits, &m->f1,
                &m->f2, &m->f3, &m->f4);
 
-    m->location[0] = '\0';
+    m->path[0] = '\0';
 
     if (n != 7) {
         threadscan_fatal("threadscan internal error: "
@@ -102,8 +102,8 @@ static int read_mapline (FILE *fp, mapline_t *m)
         char c;
         while (' ' == (c = fgetc(fp)));
         if (c != '\n' && c != EOF) {
-            m->location[0] = c;
-            n = fscanf(fp, "%s\n", &m->location[1]); // FIXME: not safe.
+            m->path[0] = c;
+            n = fscanf(fp, "%s\n", &m->path[1]); // FIXME: not safe.
             if (n != 1) {
                 threadscan_fatal("threadscan internal error: "
                                  "fscanf returned %d\n",
@@ -141,6 +141,34 @@ void threadscan_proc_stack_from_addr (mem_range_t *mem_range, size_t addr)
             addr < mapline.range_end) {
             mem_range->low = mapline.range_begin;
             mem_range->high = mapline.range_end;
+            break;
+        }
+    }
+
+    fclose(fp);
+}
+
+void threadscan_proc_map_iterate (int (*f) (void *arg,
+                                            size_t begin,
+                                            size_t end,
+                                            const char *bits,
+                                            const char *path),
+                                  void *user_arg)
+{
+    FILE *fp;
+    mapline_t mapline;
+
+    if (NULL == (fp = fopen(procmap, "r"))) {
+        threadscan_fatal("threadscan: unable to open memory map file.\n");
+    }
+
+    while (read_mapline(fp, &mapline)) {
+        if (0 == f(user_arg,
+                   mapline.range_begin,
+                   mapline.range_end,
+                   mapline.bits,
+                   mapline.path)) {
+            // User wants to stop.
             break;
         }
     }
@@ -186,6 +214,35 @@ int threadscan_proc_signal_all_except (int sig, thread_data_t *except)
     FOREACH_IN_THREAD_LIST(td, &thread_list)
         assert(td);
         if (td != except && td->is_active) {
+            int ret = pthread_kill(td->self, sig);
+            if (EINVAL == ret) {
+                threadscan_fatal("threadscan: "
+                                 "pthread_kill() returned EINVAL.\n");
+            } else if (ESRCH == ret) {
+                threadscan_diagnostic("threadscan: "
+                                      "pthread_kill() returned ESRCH.\n");
+            } else {
+                ++signal_count;
+            }
+        }
+    ENDFOREACH_IN_THREAD_LIST(td, &thread_list);
+
+    return signal_count;
+}
+
+/**
+ * Send a signal to all threads in the process using pthread_kill().
+ */
+int threadscan_proc_signal (int sig)
+{
+    int signal_count = 0;
+    thread_data_t *td;
+
+    // Yay!  C doesn't have lambdas!  So this is way uglier and more fragile
+    // than it needs to be!  Thanks, C.
+    FOREACH_IN_THREAD_LIST(td, &thread_list)
+        assert(td);
+        if (td->is_active) {
             int ret = pthread_kill(td->self, sig);
             if (EINVAL == ret) {
                 threadscan_fatal("threadscan: "

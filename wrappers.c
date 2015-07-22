@@ -155,8 +155,8 @@ int pthread_create (pthread_t *thread,
     return ret;
 }
 
-__attribute__((visibility("default"), noreturn))
-void pthread_exit (void *retval)
+__attribute__((noreturn))
+static void exit_wrapper (void *retval)
 {
     assert(orig_pthread_exit);
 
@@ -165,6 +165,17 @@ void pthread_exit (void *retval)
     orig_pthread_exit(retval);
 
     abort(); // Should never get past orig_pthread_exit();
+}
+
+__attribute__((visibility("default"), noreturn))
+void pthread_exit (void *retval)
+{
+    exit_wrapper(retval);
+}
+
+void threadscan_pthread_exit (void *retval)
+{
+    exit_wrapper(retval);
 }
 
 __attribute__((visibility("default")))
@@ -215,6 +226,14 @@ int __libc_start_main(int (*main) (int, char **, char **),
                       void (*rtld_fini) (void),
                       void (*stack_end))
 {
+    extern void *threadscan_gc_thread (void *); // Defined in threadscan.c.
+    pthread_t tid;
+    int ret = orig_pthread_create(&tid, NULL, threadscan_gc_thread, NULL);
+    if (0 != ret) {
+        threadscan_fatal("Unable to start garbage collector.\n");
+        // Does not return.
+    }
+
     orig_main = main;
     return orig_libc_start_main(main_replacement, argc, ubp_av,
                                 init, fini, rtld_fini, stack_end);

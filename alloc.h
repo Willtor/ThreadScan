@@ -43,4 +43,15 @@ void *threadscan_alloc_mmap (size_t size);
  */
 void threadscan_alloc_munmap (void *ptr);
 
+/**
+ * Given a *big_range, return the first chunk of it that doesn't contain
+ * memory that belongs to threadscan.  *big_range is modified to show the
+ * remaining portion of the range.  This is not thread-safe.
+ *
+ * @return A chunk of memory that does not overlap with memory owned by
+ * threadscan.  This chunk may have zero length if no such chunk could be
+ * found in *big_range.
+ */
+mem_range_t threadscan_alloc_next_subrange (mem_range_t *big_range);
+
 #endif // !defined _ALLOC_H_

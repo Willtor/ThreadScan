@@ -80,7 +80,11 @@ void *threadscan_thread_base (void *arg)
     td->is_active = 1;
 
     // Call the user thread.  Exit with the return code when complete.
-    pthread_exit(td->user_routine(td->user_arg));
+    // Note: Have to use the "threadscan_" version of pthread_exit() since it
+    // sometimes binds the wrong pthread_exit() on some systems.  Not clear
+    // why...
+    extern void threadscan_pthread_exit (void *);
+    threadscan_pthread_exit(td->user_routine(td->user_arg));
 
     assert(0); // Should never get past pthread_exit().
     return 0;

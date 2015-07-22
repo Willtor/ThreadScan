@@ -23,7 +23,10 @@ THE SOFTWARE.
 #define _GNU_SOURCE // For pthread_yield().
 #include "alloc.h"
 #include <assert.h>
+#include "child.h"
 #include "env.h"
+#include <fcntl.h>
+#include <malloc.h>
 #include "proc.h"
 #include <pthread.h>
 #include <signal.h>
@@ -38,42 +41,15 @@ THE SOFTWARE.
 /*                                  Macros                                  */
 /****************************************************************************/
 
+#define PIPE_READ  0
+#define PIPE_WRITE 1
+
 #define SIGTHREADSCAN SIGUSR1
-
-#define SCAN_MAP_OFFSET 0
-
-#define PTR_MASK(v) ((v) & ~3) // Mask off the low two bits.
 
 #define SET_LOW_BIT(p) do {                      \
         size_t v = (size_t)*(p);                 \
         if ((v & 1) == 0) { *(p) = (v + 1); }    \
     } while (0)
-
-#ifndef NDEBUG
-static void assert_monotonicity (size_t *a, int n)
-{
-    size_t last = 0;
-    int i;
-    for (i = 0; i < n; ++i) {
-        if (a[i] <= last) {
-            threadscan_fatal("The list is not monotonic at position %d "
-                             "out of %d (%llu, last: %llu)\n",
-                             i, n, a[i], last);
-        }
-        last = a[i];
-    }
-}
-#else
-#define assert_monotonicity(a, b) /* nothing. */
-#endif
-
-#define BINARY_THRESHOLD 32
-
-#define GET_STACK_POINTER(qword)                \
-    __asm__("movq %%rsp, %0"                    \
-            : "=m"(qword)                       \
-            : "r"("%rsp")                       \
-            : )
 
 /****************************************************************************/
 /*                           Typedefs and structs                           */
@@ -81,44 +57,11 @@ static void assert_monotonicity (size_t *a, int n)
 
 typedef struct threadscan_data_t threadscan_data_t;
 
-typedef struct addr_storage_t addr_storage_t;
-
-typedef struct do_reclaim_arg_t do_reclaim_arg_t;
-
 struct threadscan_data_t {
     int max_ptrs; // Max pointer count that can be tracked during reclamation.
 
-    // Addresses being tracked for reclamation.
-    int n_addrs;
-    size_t *buf_addrs;
-
-    // Scan map is a mini-map of buf_addrs.  One element in the scan map
-    // corresponds to a page of addresses in buf_addrs.
-    int n_scan_map;
-    size_t *buf_scan_map;
-
-    // Instead of allocating each of the above buffers, we allocate one _big_
-    // buffer and then split it up.  The working_buffer_sz is the size of
-    // that buffer, and the offset_list is used for assigning the pointers to
-    // the individual sub-buffers.
+    // Size of the BIG buffer used to store pointers for a collection run.
     size_t working_buffer_sz;
-    size_t offset_list[2];
-
-    // Some pointers may not have been free'd.  We have to keep them around
-    // for the next iteration.  storage is a buffer of un-free'd pointers.
-    addr_storage_t *storage;
-};
-
-struct addr_storage_t {
-    addr_storage_t *next;
-    size_t length;
-    size_t addrs[];
-};
-
-struct do_reclaim_arg_t {
-    // Return values:
-    size_t *addrs;
-    int count;
 };
 
 /****************************************************************************/
@@ -128,291 +71,67 @@ struct do_reclaim_arg_t {
 __attribute__((visibility("default")))
 void threadscan_collect (void *ptr);
 
-__attribute__((visibility("default")))
-void threadscan_register_local_block (void *addr, size_t size);
-
 static threadscan_data_t g_tsdata;
 
-static volatile int self_stacks_searched = 1;
+// For signaling the garbage collector with work to do.
+static pthread_mutex_t g_gc_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_gc_cond = PTHREAD_COND_INITIALIZER;
+static int g_gc_waiting;
+static volatile int g_received_signal;
+static volatile size_t g_cleanup_counter;
+
+static gc_data_t *g_gc_data, *g_uncollected_data;
 
 /****************************************************************************/
 /*                            Pointer tracking.                             */
 /****************************************************************************/
 
-static void assign_working_space (char *buf)
-{
-    g_tsdata.buf_addrs = (size_t*)buf;
-    g_tsdata.buf_scan_map =
-        (size_t*)(buf + g_tsdata.offset_list[SCAN_MAP_OFFSET]);
-}
-
-/**
- * The remaining n pointers were unable to be free'd because there were
- * outstanding references.  Store them away until the next run.
- */
-static void store_remaining_addrs (size_t *addrs, int n)
-{
-    addr_storage_t *tmp;
-
-    if (n == 0) {
-        // Nothing remaining, nothing to store.
-        threadscan_alloc_munmap(addrs);
-        return;
-    }
-
-    if (n + 2 > g_tsdata.max_ptrs * 2) {
-        threadscan_fatal("threadscan internal error: "
-                         "Ran out of storage space.\n");
-    }
-
-    // Convert the array of addresses to an addr_storage_t struct.  That
-    // struct ends with an array of addresses, but it starts with a pointer
-    // and a length field.  Move the first two addresses to the end and
-    // reuse the space they used to occupy as the pointer and length fields.
-    addrs[n] = addrs[0];
-    addrs[n + 1] = addrs[1];
-    tmp = (addr_storage_t*)addrs;
-    tmp->length = n;
-
-    do {
-        tmp->next = g_tsdata.storage;
-    } while (!BCAS(&g_tsdata.storage, tmp->next, tmp));
-}
-
-/**
- * Move addresses over to the current working list of addrs.  Add the
- * number of elements copied over into *n.
- */
-static void add_to_buf_addrs (int *n, size_t *buf, int max)
-{
-    if (*n + max > g_tsdata.max_ptrs * 2) {
-        threadscan_diagnostic("*n = %d, max = %d\n", *n, max);
-        threadscan_fatal("threadscan internal error: "
-                         "overflowed address list.\n");
-    }
-
-    memcpy(&g_tsdata.buf_addrs[*n], buf, max * sizeof(size_t));
-    *n += max;
-}
-
-static int generate_working_pointers_list ()
+static void generate_working_pointers_list (gc_data_t *gc_data)
 {
     int n = 0;
     thread_list_t *thread_list = threadscan_proc_get_thread_list();
     thread_data_t *td;
 
-    // Add leftover pointers.
-    addr_storage_t *leftovers =
-        __sync_lock_test_and_set(&g_tsdata.storage, NULL);
-
-    while (leftovers) {
-        add_to_buf_addrs(&n, leftovers->addrs, leftovers->length);
-        addr_storage_t *tmp = leftovers;
-        leftovers = leftovers->next;
-        threadscan_alloc_munmap(tmp);
-    }
-
     // Add the pointers from each of the individual thread buffers.
     FOREACH_IN_THREAD_LIST(td, thread_list)
         assert(td);
-        n += threadscan_queue_pop_bulk(&g_tsdata.buf_addrs[n],
-                                       g_tsdata.max_ptrs * 2 - n,
+        n += threadscan_queue_pop_bulk(&gc_data->addrs[n],
+                                       g_tsdata.max_ptrs - n,
                                        &td->ptr_list);
     ENDFOREACH_IN_THREAD_LIST(td, thread_list);
 
-    return n;
-}
-
-static void generate_scan_map ()
-{
-    int i;
-    g_tsdata.n_scan_map = 0;
-    for (i = 0; i < g_tsdata.n_addrs;
-         i += (PAGESIZE / sizeof(size_t))) {
-        g_tsdata.buf_scan_map[g_tsdata.n_scan_map] =
-            g_tsdata.buf_addrs[i];
-        ++g_tsdata.n_scan_map;
-    }
-}
-
-static int iterative_search (size_t val, size_t *a, int min, int max)
-{
-    if (a[min] > val || min == max) return min;
-    for ( ; min < max; ++min) {
-        size_t cmp = a[min];
-        if (cmp == val) return min;
-        if (cmp > val) break;
-    }
-    return min - 1;
-}
-
-static int binary_search (size_t val, size_t *a, int min, int max)
-{
-    while (max - min >= BINARY_THRESHOLD) {
-        int mid = (max + min) / 2;
-        size_t cmp = a[mid];
-        if (cmp == val) return mid;
-
-        if (cmp > val) max = mid;
-        else min = mid;
-    }
-
-    return iterative_search(val, a, min, max);
-}
-
-/****************************************************************************/
-/*                            Search utilities.                             */
-/****************************************************************************/
-
-static void do_search (size_t *mem, size_t range_size)
-{
-    size_t i;
-    size_t min_ptr, max_ptr;
-
-    min_ptr = g_tsdata.buf_addrs[0];
-    max_ptr = g_tsdata.buf_addrs[g_tsdata.n_addrs - 1];
-
-    assert(min_ptr <= max_ptr);
-
-    for (i = 0; i < range_size; ++i) {
-        size_t cmp = PTR_MASK(mem[i]);
-
-        // PTR_MASK catches pointers that have been hidden through overloading
-        // the two low-order bits.
-
-        if (cmp < min_ptr || cmp > max_ptr) continue;
-        if (min_ptr == cmp) {
-            SET_LOW_BIT(&g_tsdata.buf_addrs[0]);
-            continue;
-        } else if (max_ptr == cmp) {
-            SET_LOW_BIT(&g_tsdata.buf_addrs[g_tsdata.n_addrs - 1]);
-            continue;
-        }
-
-        // Level 1 search: Find the page the address would be on.
-        int v = binary_search(cmp, g_tsdata.buf_scan_map, 0,
-                              g_tsdata.n_scan_map);
-        // Level 2 search: Find the address within the page.
-        int loc = binary_search(cmp, g_tsdata.buf_addrs,
-                                v * (PAGESIZE / sizeof(size_t)),
-                                v == g_tsdata.n_scan_map - 1
-                                ? g_tsdata.n_addrs
-                                : (v + 1) * (PAGESIZE / sizeof(size_t)));
-        if (g_tsdata.buf_addrs[loc] == cmp) {
-            SET_LOW_BIT(&g_tsdata.buf_addrs[loc]);
-        }
-#ifndef NDEBUG
-        else {
-            int loc2 = binary_search(cmp, g_tsdata.buf_addrs,
-                                     0, g_tsdata.n_addrs);
-            assert(g_tsdata.buf_addrs[loc2] != cmp);
-        }
-#endif
-    }
-}
-
-static void search_range (mem_range_t *mem_range)
-{
-    size_t *mem;
-
-    assert(mem_range);
-
-    mem = (size_t*)mem_range->low;
-    assert_monotonicity(g_tsdata.buf_addrs, g_tsdata.n_addrs);
-    do_search(mem, (mem_range->high - mem_range->low) / sizeof(size_t));
-    return;
-}
-
-/****************************************************************************/
-/*                           Post-search analysis                           */
-/****************************************************************************/
-
-static int handle_unreferenced_ptrs (size_t *addrs, int count)
-{
-    int write_position;
-    int i;
-
-    write_position = 0;
-    for (i = 0; i < count; ++i) {
-        if (addrs[i] & 1) {              // Outstanding reference.
-            addrs[write_position] = PTR_MASK(addrs[i]);
-            addrs[i] = 0;
-            ++write_position;
-        } else {                         // No remaining references.
-            free((void*)addrs[i]);
-            addrs[i] = 0;
-        }
-    }
-
-    return write_position;
+    gc_data->n_addrs = n;
 }
 
 /****************************************************************************/
 /*                             Cleanup thread.                              */
 /****************************************************************************/
 
-static void do_reclaim (size_t rsp, do_reclaim_arg_t *do_reclaim_arg)
-{
-    int sig_count;
-    mem_range_t user_stack = threadscan_thread_user_stack();
-    mem_range_t stack_search_range = { rsp, user_stack.high };
-    mem_range_t *local_block = &threadscan_thread_get_td()->local_block;
-
-    // Signal all of the threads that a scan is about to happen.
-    self_stacks_searched = 0;
-    sig_count = threadscan_thread_signal_all_but_me(SIGTHREADSCAN);
-
-    // Check my stack for references.
-    search_range(&stack_search_range);
-
-    // Search the local region, if it's been set.
-    if (local_block->low > 0) {
-        search_range(local_block);
-    }
-
-    while (self_stacks_searched < sig_count) {
-        __sync_synchronize(); // mfence.
-    }
-
-    do_reclaim_arg->addrs = g_tsdata.buf_addrs;
-    do_reclaim_arg->count = g_tsdata.n_addrs;
-}
-
 static void threadscan_reclaim ()
 {
-    size_t rsp;
-    do_reclaim_arg_t do_reclaim_arg;
-    void *working_memory;
+    char *working_memory;   // Block of memory to free.
+    gc_data_t *gc_data;
 
-    GET_STACK_POINTER(rsp);
-
+    // Get memory to store the list of pointers:
+    //   0 - 4095: Reserved page for the gc_data_t struct.
+    //   4096 -  : Address list.
     working_memory = threadscan_alloc_mmap(g_tsdata.working_buffer_sz);
-    assign_working_space(working_memory);
-    g_tsdata.n_addrs = generate_working_pointers_list();
+    gc_data = (gc_data_t*)working_memory;
+    gc_data->addrs = (size_t*)&working_memory[PAGE_SIZE];
+    gc_data->n_addrs = 0;
 
-    // Sort the pointers and remove duplicates.
-    threadscan_util_sort(g_tsdata.buf_addrs, g_tsdata.n_addrs);
+    // Copy the pointers into the list.
+    generate_working_pointers_list(gc_data);
 
-    // Populate the scan_map: a minimap for searching for addresses.  This map
-    // takes the first address on each page of memory and is used as a level 1
-    // search that indicates where an address would be in the buf_addrs list,
-    // if it's there at all.
-    generate_scan_map();
-
-    do_reclaim(rsp, &do_reclaim_arg);
+    // Give the list to the gc thread, signaling it if it's asleep.
+    pthread_mutex_lock(&g_gc_mutex);
+    gc_data->next = g_gc_data;
+    g_gc_data = gc_data;
+    if (g_gc_waiting != 0) {
+        pthread_cond_signal(&g_gc_cond);
+    }
+    pthread_mutex_unlock(&g_gc_mutex);
     threadscan_thread_cleanup_release();
-
-    // Check for pointers to free.  w00t!
-    assert_monotonicity(do_reclaim_arg.addrs, do_reclaim_arg.count);
-    int remaining =
-        handle_unreferenced_ptrs(do_reclaim_arg.addrs,
-                                 do_reclaim_arg.count);
-
-    // There may be some remaining pointers that could not be free'd.  They
-    // should be stored for the next round, and will be searched again until
-    // there are no outstanding references to them.
-    threadscan_util_randomize(do_reclaim_arg.addrs, remaining);
-    store_remaining_addrs(do_reclaim_arg.addrs, remaining);
 }
 
 /**
@@ -432,9 +151,8 @@ void threadscan_collect (void *ptr)
     thread_data_t *td = threadscan_thread_get_td();
     threadscan_queue_push(&td->ptr_list, (size_t)ptr); // Add the pointer.
     while (threadscan_queue_is_full(&td->ptr_list)) {
-        // While this thread's local queue of pointers is full, try to cleanup
-        // or help with cleanup.  If someone else has already started cleanup,
-        // this thread will break out of this loop soon enough.
+        // While this thread's local queue of pointers is full, try to initiate
+        // reclamation.
 
         threadscan_thread_cleanup_try_acquire()
             ? threadscan_reclaim() // reclaim() will release the cleanup lock.
@@ -442,16 +160,109 @@ void threadscan_collect (void *ptr)
     }
 }
 
-__attribute__((visibility("default")))
-void threadscan_register_local_block (void *addr, size_t size)
+static int read_from_child (int fd, void *buffer)
 {
-    mem_range_t *local_block = &threadscan_thread_get_td()->local_block;
-    local_block->high = (size_t)addr + size;
+    int ret = read(fd, buffer, sizeof(size_t));
+    if (! (ret == 0 || ret == sizeof(size_t))) {
+        threadscan_fatal("Error reading from file descriptor.\n");
+    }
+    return ret;
+}
 
-    // Set "low" last.  This is for safety -- if a thread is setting this value
-    // when a reclamation happens, it will check the "low" value, and if it
-    // hasn't been set, there's no chance of funky reads.
-    local_block->low = (size_t)addr;
+static void garbage_collect (gc_data_t *gc_data)
+{
+    int pipefd[2];
+    int sig_count;
+    pid_t pid;
+
+    if (0 != pipe2(pipefd, 0)) {
+        threadscan_fatal("Collection failed (pipe2).\n");
+    }
+
+    // Send out signals.  When everybody is waiting at the line, fork the
+    // process for the snapshot.
+    g_received_signal = 0;
+    sig_count = threadscan_proc_signal(SIGTHREADSCAN);
+    while (g_received_signal < sig_count) pthread_yield();
+    pid = fork();
+
+    if (pid == -1) {
+        threadscan_fatal("Collection failed (fork).\n");
+    } else if (pid == 0) {
+        // Child: Scan memory, pass pointers back to the parent to free, pass
+        // remaining pointers back, and exit.
+        close(pipefd[PIPE_READ]);
+
+        // Include the addrs from the last collection iteration.
+        if (g_uncollected_data) {
+            g_uncollected_data->next = gc_data;
+            gc_data = g_uncollected_data;
+        }
+        threadscan_child(gc_data, pipefd[PIPE_WRITE]);
+
+        close(pipefd[PIPE_WRITE]);
+        exit(0);
+    }
+
+    // Parent: Listen to the child process.  It will report pointers to free
+    // followed by pointers that could not be collected.
+    size_t addr;
+    enum { FREEING, STORING } mode = FREEING;
+
+    ++g_cleanup_counter;
+    close(pipefd[PIPE_WRITE]);
+
+    gc_data->n_addrs = 0;
+    if (g_uncollected_data) {
+        threadscan_alloc_munmap(g_uncollected_data); // FIXME: munmap is slow!
+    }
+
+    while (read_from_child(pipefd[PIPE_READ], (void*)&addr)) {
+        if (0 == addr) {
+            // Switch from free'ing pointers to saving them for the next round.
+            mode = STORING;
+        } else {
+            if (mode == FREEING) {
+                void *p = (void*)addr;
+                memset(p, 0, malloc_usable_size(p));
+                free(p);
+            } else gc_data->addrs[gc_data->n_addrs++] = addr;
+        }
+    }
+
+    close(pipefd[PIPE_READ]);
+
+    // Save the old addresses.
+    g_uncollected_data = gc_data;
+    //threadscan_diagnostic("%d remaining.\n", gc_data->n_addrs);
+}
+
+/**
+ * Garbage-collector thread.
+ */
+void *threadscan_gc_thread (void *ignored)
+{
+    gc_data_t *gc_data;
+
+    while ((1)) {
+        pthread_mutex_lock(&g_gc_mutex);
+        if (NULL == g_gc_data) {
+            // Wait for somebody to come up with a set of addresses for us to
+            // collect.
+            g_gc_waiting = 1;
+            pthread_cond_wait(&g_gc_cond, &g_gc_mutex);
+            g_gc_waiting = 0;
+        }
+
+        assert(g_gc_data);
+        gc_data = g_gc_data;
+        g_gc_data = NULL;
+        pthread_mutex_unlock(&g_gc_mutex);
+
+        garbage_collect(gc_data);
+    }
+
+    return NULL;
 }
 
 /****************************************************************************/
@@ -459,45 +270,17 @@ void threadscan_register_local_block (void *addr, size_t size)
 /****************************************************************************/
 
 /**
- * Perform a search of the thread stack for pointers to objects that have
- * been removed.
- */
-static void *search_self_stack (void *arg)
-{
-    mem_range_t user_stack = threadscan_thread_user_stack();
-    mem_range_t stack_search_range = { (size_t)arg, user_stack.high };
-    mem_range_t *local_block = &threadscan_thread_get_td()->local_block;
-
-    assert(arg);
-
-    // Search the stack for incriminating references.
-    search_range(&stack_search_range);
-
-    // Search the local region, if it's been set.
-    if (local_block->low > 0) {
-        search_range(local_block);
-    }
-
-    // Mark this thread done.
-    __sync_fetch_and_add(&self_stacks_searched, 1);
-
-    // Go back to work.
-    return NULL;
-}
-
-/**
  * Got a signal from a thread wanting to do cleanup.
  */
 static void signal_handler (int sig)
 {
-    size_t rsp;
+    size_t old_counter;
     assert(SIGTHREADSCAN == sig);
 
-    GET_STACK_POINTER(rsp);
-
-    threadscan_thread_cleanup_raise_flag(); // FIXME: Do we need timestamps?
-    search_self_stack((void*)rsp);
-    threadscan_thread_cleanup_lower_flag();
+    // Acknowledge the signal and wait for the snapshot to complete.
+    old_counter = g_cleanup_counter;
+    __sync_fetch_and_add(&g_received_signal, 1);
+    while (old_counter == g_cleanup_counter) pthread_yield();
 }
 
 /**
@@ -512,30 +295,9 @@ static void register_signal_handlers ()
         threadscan_fatal("threadscan: Unable to register signal handler.\n");
     }
 
-    g_tsdata.max_ptrs = g_threadscan_ptrs_per_thread
-        * MAX_THREAD_COUNT;
+    g_tsdata.max_ptrs = g_threadscan_ptrs_per_thread * MAX_THREAD_COUNT;
 
-    // Figure out how big the scan map needs to be.  It should be large
-    // enough to store one pointer for every page in the main buffer of
-    // addresses, and we round up to the nearest page to avoid sharing
-    // with the buf_addrs.
-    int scan_map_sz = (2 * g_tsdata.max_ptrs * sizeof(size_t) * sizeof(size_t))
-        / PAGESIZE;
-    if (scan_map_sz % PAGESIZE) {
-        scan_map_sz += PAGESIZE;
-        scan_map_sz &= ~(PAGESIZE - 1);
-    }
-
-    // Since we allocate all the buffers in a single allocation, do all the
-    // necessary math to get the size of that alloc.  Also, calculate the
-    // offsets into that big buffer for all of the sub-buffers.
-
-    // Reserve space for buf_addrs.
-    g_tsdata.working_buffer_sz = g_tsdata.max_ptrs * sizeof(size_t) * 2;
-    g_tsdata.offset_list[SCAN_MAP_OFFSET] = g_tsdata.working_buffer_sz;
-
-    // Reserve space for the scan map.
-    g_tsdata.working_buffer_sz += scan_map_sz;
-
-    g_tsdata.storage = NULL;
+    // Calculate reserved space for stored addresses.
+    g_tsdata.working_buffer_sz = g_tsdata.max_ptrs * sizeof(size_t)
+        + PAGE_SIZE;
 }

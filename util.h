@@ -61,6 +61,8 @@ THE SOFTWARE.
 #define TIMESTAMP_IS_ACTIVE(field) ((field) & _TIMESTAMP_FLAG)
 #define TIMESTAMP_SET_ACTIVE(field) TIMESTAMP_RAISE_FLAG(field)
 
+#define PAGE_SIZE 4096
+
 typedef struct mem_range_t mem_range_t;
 
 typedef struct thread_data_t thread_data_t;

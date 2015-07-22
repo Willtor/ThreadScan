@@ -6,7 +6,7 @@ THREADSCAN = libthreadscan.so
 TARGETS	= $(THREADSCAN)
 
 THREADSCAN_SRC = queue.c env.c wrappers.c alloc.c util.c thread.c	\
-	proc.c threadscan.c
+	proc.c child.c threadscan.c
 THREADSCAN_OBJ = $(THREADSCAN_SRC:.c=.o)
 
 # The -fno-zero-initialized-in-bss flag appears to be busted.

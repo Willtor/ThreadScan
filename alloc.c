@@ -202,6 +202,45 @@ static void metadata_free (memory_metadata_t *meta)
     pthread_mutex_unlock(&list_lock);
 }
 
+/**
+ * See threadscan_alloc_next_subrange().  This is not thread-safe.
+ */
+static mem_range_t metadata_break_range (mem_range_t *big_range)
+{
+    mem_range_t ret = *big_range;
+    memory_metadata_t *curr;
+
+    assert(alloc_list);
+
+    // Advance to where big_range begins.
+    curr = alloc_list;
+    while (HIGH_ADDR(curr) <= ret.low) {
+        curr = curr->next;
+        if (curr == alloc_list) break;
+    }
+
+    if (HIGH_ADDR(curr) > ret.low && LOW_ADDR(curr) < ret.high) {
+        // Advance the beginning of the range until it reaches something we
+        // haven't allocated.
+        while (LOW_ADDR(curr) <= ret.low) {
+            if (HIGH_ADDR(curr) >= ret.low) {
+                ret.low = MIN_OF(HIGH_ADDR(curr), ret.high);
+            }
+            curr = curr->next;
+            if (curr == alloc_list) break;
+        }
+        if (LOW_ADDR(curr) > ret.low) {
+            ret.high = MIN_OF(LOW_ADDR(curr), ret.high);
+        }
+    } else {
+        // The big_range falls entirely outside the range of our allocations.
+    }
+
+    big_range->low = ret.high;
+
+    return ret;
+}
+
 /****************************************************************************/
 /*                                Interface                                 */
 /****************************************************************************/
@@ -242,4 +281,19 @@ void threadscan_alloc_munmap (void *ptr)
         threadscan_fatal("threadscan: failed munmap().\n");
     }
     metadata_free(meta);
+}
+
+/**
+ * Given a *big_range, return the first chunk of it that doesn't contain
+ * memory that belongs to threadscan.  *big_range is modified to show the
+ * remaining portion of the range.  This is not thread-safe.
+ *
+ * @return A chunk of memory that does not overlap with memory owned by
+ * threadscan.  This chunk may have zero length if no such chunk could be
+ * found in *big_range.
+ */
+mem_range_t threadscan_alloc_next_subrange (mem_range_t *big_range)
+{
+    // FIXME: Using mem_range_t creates a circular dependency on util.h.
+    return metadata_break_range(big_range);
 }
