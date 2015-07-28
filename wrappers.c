@@ -202,6 +202,10 @@ static int main_replacement (int argc, char **argv, char **env)
     td->user_arg = &main_args;
     threadscan_proc_stack_from_addr(&stack_data, (size_t)&stack_data);
     td->user_stack_low = (char*)stack_data.low;
+
+    // Insert the metadata into the global structure.
+    threadscan_proc_add_thread_data(td);
+
     threadscan_thread_base(td);
     assert(0); // Should not return.  It should die in main_thunk().
     return 0;
