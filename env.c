@@ -42,7 +42,7 @@ static int get_int (const char *val, int default_val)
     return atoi(val);
 }
 
-__attribute__((constructor))
+__attribute__((constructor (101)))
 static void env_init ()
 {
     // Pointers per thread -- how many pointers a thread can track before a

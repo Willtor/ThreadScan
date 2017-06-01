@@ -503,7 +503,7 @@ static void signal_handler (int sig)
 /**
  * Like it sounds.
  */
-__attribute__((constructor))
+__attribute__((constructor (201)))
 static void register_signal_handlers ()
 {
     /* We signal threads to get them to stop while we prepare a snapshot
