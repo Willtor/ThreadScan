@@ -1,5 +1,9 @@
 # The ThreadScan Memory Reclamation System
 
+## Author's Note
+
+Threadscan is succeeded by Forkscan (https://github.com/Willtor/forkscan) for memory reclamation in concurrent data structures.  This repository is kaput, but Threadscan is kept in a maintenance branch of Forkscan.  I will still respond to bug reports (info below) for Threadscan, but I won't be adding new features.  Cheers!
+
 ## Introduction
 
 ThreadScan is a library for performing automated memory reclamation on concurrent data structures in C and C++.
